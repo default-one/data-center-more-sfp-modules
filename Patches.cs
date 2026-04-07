@@ -42,41 +42,6 @@ namespace MoreSFPModules
     }
 
     // =========================================================================
-    // Patch: MainGameManager.GetSfpPrefab (Prefix)
-    // Intercepts requests for our custom prefabIDs and returns a freshly cloned
-    // module instead of falling through to the vanilla array lookup.
-    // Building fresh every call avoids Il2Cpp GC invalidation of cached pointers.
-    // =========================================================================
-    [HarmonyPatch(typeof(MainGameManager), nameof(MainGameManager.GetSfpPrefab))]
-    internal static class PatchGetSfpPrefab
-    {
-        private static bool Prefix(MainGameManager __instance, int prefabID, ref GameObject __result)
-        {
-            if (!ModuleRegistry.TryGet(prefabID, out var entry)) return true;
-
-            __result = Core.BuildModulePrefab(__instance, prefabID, entry);
-            return false;
-        }
-    }
-
-    // =========================================================================
-    // Patch: MainGameManager.GetSfpBoxPrefab (Prefix)
-    // Intercepts requests for our custom box prefabIDs and returns a freshly
-    // cloned box with the correct sfpBoxType and child module speed/ID.
-    // =========================================================================
-    [HarmonyPatch(typeof(MainGameManager), nameof(MainGameManager.GetSfpBoxPrefab))]
-    internal static class PatchGetSfpBoxPrefab
-    {
-        private static bool Prefix(MainGameManager __instance, int prefabID, ref GameObject __result)
-        {
-            if (!ModuleRegistry.TryGet(prefabID, out var entry)) return true;
-
-            __result = Core.BuildBoxPrefab(__instance, prefabID, entry);
-            return false;
-        }
-    }
-
-    // =========================================================================
     // Patch: ComputerShop.GetPrefabForItem (Prefix)
     // Routes our custom itemID to the correct prefab when the player buys from
     // the shop. Handles both SFPBox (type 9) and bare SFPModule (type 8).
@@ -129,13 +94,42 @@ namespace MoreSFPModules
             {
                 if (prefabID < 0 || prefabID >= arr.Length) continue;
 
-                var template = Core.BuildModulePrefab(mgm, prefabID, entry);
-                if (template != null)
+                if (arr[prefabID] == null)
                 {
-                    template.name = $"SFPModule_template_{prefabID}";
-                    Object.DontDestroyOnLoad(template);
+                    var template = Core.BuildModulePrefab(mgm, prefabID, entry,
+                                                          Core.TemplateHolder?.transform);
+                    if (template != null)
+                        template.name = $"SFPModule_template_{prefabID}";
+                    arr[prefabID] = template;
                 }
-                arr[prefabID] = template;
+            }
+        }
+    }
+
+    // =========================================================================
+    // Patch: CableLink.InsertSFP (Prefix)
+    // Child modules taken from a custom box retain the vanilla QSFP+ prefabID
+    // (3) because setting prefabID on active child GameObjects causes the world
+    // tracker to spawn infinite loose modules. Instead we fix it here — at the
+    // exact moment the module is inserted into a port — so the save stores the
+    // correct custom prefabID and load can restore the right module.
+    // =========================================================================
+    [HarmonyPatch(typeof(CableLink), nameof(CableLink.InsertSFP))]
+    internal static class PatchCableLinkInsertSFP
+    {
+        private static void Prefix(float speed, SFPModule module)
+        {
+            var usableObj = module?.GetComponent<UsableObject>();
+            if (usableObj == null) return;
+
+            foreach (var (prefabID, entry) in ModuleRegistry.Entries)
+            {
+                if (Mathf.Approximately(speed, entry.SpeedInternal) &&
+                    usableObj.prefabID != prefabID)
+                {
+                    usableObj.prefabID = prefabID;
+                    break;
+                }
             }
         }
     }

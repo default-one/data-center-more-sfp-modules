@@ -20,6 +20,11 @@ namespace MoreSFPModules
         // prefabID of the vanilla QSFP+ module — used as clone source in BuildModulePrefab/BuildBoxPrefab.
         internal static int BaseQsfpPrefabID = -1;
 
+        // Inactive holder for prefab templates — parenting templates here makes their
+        // activeInHierarchy = false, so the game's UsableObject tracker ignores them.
+        // Object.Instantiate still produces active clones from inactive-hierarchy objects.
+        internal static GameObject TemplateHolder { get; private set; }
+
         // -----------------------------------------------------------------------
         // Scans vanilla sfpPrefabs to find the highest-speed module (QSFP+ 40G),
         // stores it as the clone source, then extends the sfpPrefabs array with
@@ -73,6 +78,13 @@ namespace MoreSFPModules
             MelonLogger.Msg($"[More SFP] Base QSFP+: prefabID={BaseQsfpPrefabID}, " +
                             $"sfpType={BaseQsfpSfpType}, {highestSpeed * 5f} Gbps");
 
+            // Create/recreate the inactive holder that hides templates from the world system.
+            if (TemplateHolder != null)
+                Object.Destroy(TemplateHolder);
+            TemplateHolder = new GameObject("MoreSFP_TemplateHolder");
+            TemplateHolder.SetActive(false);
+            Object.DontDestroyOnLoad(TemplateHolder);
+
             const int MOD_ID_BASE = 100;
             int vanillaCount = sfpPrefabs.Length;
 
@@ -104,14 +116,13 @@ namespace MoreSFPModules
 
                 // Store a template at sfpPrefabs[id] so LoadSFPsFromSave (which does
                 // direct array access) can find the prefab during save loading.
-                // PatchLoadSFPsFromSave refreshes this slot just before each load
-                // to work around Il2Cpp GC invalidating the cached pointer over time.
-                var template = BuildModulePrefab(mgm, id, entry);
+                // Instantiated directly under TemplateHolder so it is never active
+                // in hierarchy — the world tracker ignores it.
+                // PatchLoadSFPsFromSave refreshes this slot before each load to guard
+                // against Il2Cpp GC invalidating the cached pointer over time.
+                var template = BuildModulePrefab(mgm, id, entry, TemplateHolder.transform);
                 if (template != null)
-                {
                     template.name = $"SFPModule_template_{id}";
-                    Object.DontDestroyOnLoad(template);
-                }
                 extended[id] = template;
 
                 MelonLogger.Msg($"[More SFP] Registered '{def.DisplayName}': " +
@@ -127,9 +138,14 @@ namespace MoreSFPModules
         // prefabID. Called on-demand from patches rather than caching the result,
         // because Il2Cpp's GC can silently invalidate native pointers on cached
         // GameObjects stored in C# data structures.
+        //
+        // parent: when non-null the clone is instantiated directly under that transform,
+        // so it is never active in hierarchy and the world tracker cannot pick it up.
+        // Pass TemplateHolder.transform for cached templates, null for live clones.
         // -----------------------------------------------------------------------
         internal static GameObject BuildModulePrefab(MainGameManager mgm, int prefabID,
-                                                     ModuleRegistry.Entry entry)
+                                                     ModuleRegistry.Entry entry,
+                                                     Transform parent = null)
         {
             var basePrefab = mgm.sfpPrefabs[entry.BasePrefabID];
             if (basePrefab == null)
@@ -138,7 +154,9 @@ namespace MoreSFPModules
                 return null;
             }
 
-            var clone = Object.Instantiate(basePrefab);
+            var clone = parent != null
+                ? Object.Instantiate(basePrefab, parent, false)
+                : Object.Instantiate(basePrefab);
             clone.name = $"SFPModule_custom_{prefabID}";
 
             var sfpMod = clone.GetComponent<SFPModule>();
@@ -190,14 +208,11 @@ namespace MoreSFPModules
                 usableObj.prefabID = prefabID;
 
             // The box prefab contains the SFPModules as child GameObjects.
-            // Update every child so all modules in the box have the correct speed/ID.
+            // Only update speed — do NOT set prefabID on children, as that would
+            // register them as independent world items and cause them to spawn loose.
+            // PatchCableLinkInsertSFP corrects the prefabID at insertion time instead.
             foreach (var childModule in clone.GetComponentsInChildren<SFPModule>())
-            {
                 childModule.speed = entry.SpeedInternal;
-                var childUsable = childModule.GetComponent<UsableObject>();
-                if (childUsable != null)
-                    childUsable.prefabID = prefabID;
-            }
 
             return clone;
         }
